@@ -28,7 +28,6 @@ static uint64_t arg_u64(int argc, char** argv, const std::string& key, uint64_t 
 }
 
 int main(int argc, char** argv) {
-  // Paths
   const std::string out_dir = arg_str(argc, argv, "--out", "out_run");
 
   // Sim config
@@ -37,6 +36,10 @@ int main(int argc, char** argv) {
   scfg.seed = arg_u64(argc, argv, "--seed", 123);
   scfg.steps = arg_int(argc, argv, "--steps", 500);
   scfg.sigma_z = arg_double(argc, argv, "--sigma_z", 2.0);
+  scfg.p_detect = arg_double(argc, argv, "--p_detect", 1.0);
+  scfg.clutter_prob = arg_double(argc, argv, "--clutter_prob", 0.0);
+  scfg.clutter_range = arg_double(argc, argv, "--clutter_range", 80.0);
+  scfg.scenario = arg_str(argc, argv, "--scenario", "cv"); // cv|maneuver|high_noise|clutter
 
   // KF baseline config
   KFConfig kcfg;
@@ -51,11 +54,29 @@ int main(int argc, char** argv) {
   CsvWriter meas(out_dir + "/meas.csv");
   CsvWriter est(out_dir + "/est.csv");
   CsvWriter diag(out_dir + "/diag.csv");
+  CsvWriter meta(out_dir + "/meta.csv");
 
   truth.write_line("k,x,y,vx,vy");
   meas.write_line("k,zx,zy,valid");
   est.write_line("k,x,y,vx,vy");
   diag.write_line("k,yx,yy,Sx,Sy,NIS,q,r");
+  meta.write_line("scenario,dt,seed,steps,sigma_z,p_detect,clutter_prob,clutter_range,q,r");
+
+  {
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+                  scfg.scenario.c_str(),
+                  scfg.dt,
+                  (unsigned long long)scfg.seed,
+                  scfg.steps,
+                  scfg.sigma_z,
+                  scfg.p_detect,
+                  scfg.clutter_prob,
+                  scfg.clutter_range,
+                  kcfg.q,
+                  kcfg.r);
+    meta.write_line(buf);
+  }
 
   Sim2D sim(scfg);
   KF2D kf(scfg.dt, kcfg);
@@ -65,8 +86,8 @@ int main(int argc, char** argv) {
   for (int k = 0; k < scfg.steps; ++k) {
     SimOut o = sim.step();
 
-    // tracker step
-    KFStepOut ko = kf.step(o.meas.zx, o.meas.zy, o.meas.valid);
+    KFDiag d = kf.step(o.meas.zx, o.meas.zy, o.meas.valid);
+    const KFState& s = kf.state();
 
     // log
     {
@@ -86,14 +107,14 @@ int main(int argc, char** argv) {
     {
       char buf[256];
       std::snprintf(buf, sizeof(buf), "%d,%.6f,%.6f,%.6f,%.6f",
-                    k, ko.est.x, ko.est.y, ko.est.vx, ko.est.vy);
+                    k, s.x, s.y, s.vx, s.vy);
       est.write_line(buf);
       if (do_hash) h ^= fnv1a64(buf, std::strlen(buf));
     }
     {
       char buf[256];
       std::snprintf(buf, sizeof(buf), "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-                    k, ko.yx, ko.yy, ko.Sx, ko.Sy, ko.nis, kf.cfg().q, kf.cfg().r);
+                    k, d.yx, d.yy, d.Sx, d.Sy, d.nis, kf.cfg().q, kf.cfg().r);
       diag.write_line(buf);
       if (do_hash) h ^= fnv1a64(buf, std::strlen(buf));
     }

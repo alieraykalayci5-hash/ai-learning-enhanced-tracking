@@ -1,27 +1,25 @@
 #pragma once
-#include <cstdint>
+#include <algorithm>
+
+// Constant-Velocity (CV) Kalman Filter in 2D
+// State: [x, y, vx, vy]
+// Measurement: [zx, zy] = [x, y] + noise
 
 struct KFConfig {
-  // baseline (fixed) noises
-  double q = 1.0;          // process noise scale
-  double r = 4.0;          // measurement noise variance (per-axis)
+  double q = 1.0; // process noise spectral density (acceleration noise)
+  double r = 4.0; // measurement noise variance (per-axis)
 };
 
 struct KFState {
-  // [x, y, vx, vy]
   double x = 0, y = 0, vx = 0, vy = 0;
-
-  // diag covariance only for skeleton (keeps it simple now)
-  double Pxx = 10, Pyy = 10, Pvxvx = 10, Pvyvy = 10;
 };
 
-struct KFStepOut {
-  KFState est;
+struct KFDiag {
   // innovation y = z - H x_pred
   double yx = 0, yy = 0;
-  // innovation covariance diag for skeleton
+  // innovation covariance diag (S = HPH^T + R)
   double Sx = 0, Sy = 0;
-  // NIS (2D): yx^2/Sx + yy^2/Sy
+  // NIS = y^T S^{-1} y  (2D)
   double nis = 0;
 };
 
@@ -29,16 +27,24 @@ class KF2D {
 public:
   KF2D(double dt, const KFConfig& cfg);
 
-  KFStepOut step(double zx, double zy, bool has_meas);
+  // step returns diag (innovation + NIS) and updates internal state
+  KFDiag step(double zx, double zy, bool has_meas);
 
+  const KFState& state() const { return st_; }
   const KFConfig& cfg() const { return cfg_; }
-  KFConfig& cfg_mut() { return cfg_; } // later: adaptive tuning updates this
+  KFConfig& cfg_mut() { return cfg_; }
 
 private:
   double dt_;
   KFConfig cfg_;
   KFState st_;
 
-  void predict();
-  void update(double zx, double zy);
+  // full 4x4 covariance
+  double P_[4][4]{};
+
+  void predict_();
+  void update_(double zx, double zy, KFDiag& d);
+
+  static void mat4_mul(const double A[4][4], const double B[4][4], double C[4][4]);
+  static void mat4_transpose(const double A[4][4], double AT[4][4]);
 };

@@ -1,0 +1,7 @@
+groups_total=48
+groups_train=34
+groups_val=7
+groups_test=7
+rows_train=20400
+rows_val=4200
+rows_test=4200
