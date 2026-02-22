@@ -1,5 +1,21 @@
 # Learning-Enhanced Tracking (C++17)
 
+## Results (Baseline vs A1)
+
+A1 policy: mismatch-only activation (NIS EMA threshold) + never-decrease R (safe default).
+
+| Scenario    | Pos RMSE Δ | Vel RMSE Δ | NIS abs error Δ |
+|------------|------------|------------|-----------------|
+| cv         | 0.0%       | 0.0%       | 0.0%            |
+| maneuver   | 0.0%       | 0.0%       | 0.0%            |
+| high_noise | -13.6%     | +0.2%      | +99.0%          |
+| clutter    | +4.2%      | +2.9%      | +95.5%          |
+
+Notes:
+- Nominal scenarios remain unchanged (A1 does not activate).
+- In clutter, adaptive R improves robustness and reduces tracking errors.
+- In high noise, A1 restores statistical consistency (NIS), with a conservative trade-off on position RMSE.
+
 ## Demo Output
 
 Baseline RMSE by scenario:
