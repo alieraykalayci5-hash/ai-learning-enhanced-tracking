@@ -45,22 +45,21 @@ int main(int argc, char** argv) {
   scfg.clutter_range = arg_double(argc, argv, "--clutter_range", 80.0);
   scfg.scenario = arg_str(argc, argv, "--scenario", "cv"); // cv|maneuver|high_noise|clutter
 
-  // KF baseline config
+  // KF config
   KFConfig kcfg;
   kcfg.q = arg_double(argc, argv, "--q", 1.0);
   kcfg.r = arg_double(argc, argv, "--r", 4.0);
 
-  // A1 config (adaptive R tuning)
+  // A1 config (safe adaptive R tuning)
   A1TunerConfig a1cfg;
   a1cfg.target_nis = arg_double(argc, argv, "--a1_target_nis", 2.0);
-  a1cfg.nis_ema_alpha = arg_double(argc, argv, "--a1_ema", 0.97);
-  a1cfg.gain = arg_double(argc, argv, "--a1_gain", 0.03);
-  a1cfg.deadband = arg_double(argc, argv, "--a1_deadband", 0.25);
+  a1cfg.nis_ema_alpha = arg_double(argc, argv, "--a1_ema", 0.98);
+  a1cfg.gain = arg_double(argc, argv, "--a1_gain", 0.02);
+  a1cfg.activate_ratio = arg_double(argc, argv, "--a1_activate_ratio", 2.0);
   a1cfg.r_min = arg_double(argc, argv, "--a1_rmin", 0.2);
   a1cfg.r_max = arg_double(argc, argv, "--a1_rmax", 100.0);
   a1cfg.spike_nis = arg_double(argc, argv, "--a1_spike_nis", 50.0);
-  a1cfg.spike_gain = arg_double(argc, argv, "--a1_spike_gain", 0.20);
-  a1cfg.spike_cap_ratio = arg_double(argc, argv, "--a1_spike_cap_ratio", 50.0);
+  a1cfg.spike_bump = arg_double(argc, argv, "--a1_spike_bump", 0.15);
 
   const int do_hash = arg_int(argc, argv, "--hash", 1);
 
@@ -75,18 +74,18 @@ int main(int argc, char** argv) {
   truth.write_line("k,x,y,vx,vy");
   meas.write_line("k,zx,zy,valid");
   est.write_line("k,x,y,vx,vy");
-  diag.write_line("k,yx,yy,Sx,Sy,NIS,q,r,nis_ema");
+  diag.write_line("k,yx,yy,Sx,Sy,NIS,q,r,nis_ema,base_r");
 
   meta.write_line(
     "mode,scenario,dt,seed,steps,sigma_z,p_detect,clutter_prob,clutter_range,q,r,"
-    "a1_target_nis,a1_ema,a1_gain,a1_deadband,a1_rmin,a1_rmax,a1_spike_nis,a1_spike_gain,a1_spike_cap_ratio"
+    "a1_target_nis,a1_ema,a1_gain,a1_activate_ratio,a1_rmin,a1_rmax,a1_spike_nis,a1_spike_bump"
   );
 
   {
     char buf[768];
     std::snprintf(
       buf, sizeof(buf),
-      "%s,%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+      "%s,%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
       mode.c_str(),
       scfg.scenario.c_str(),
       scfg.dt,
@@ -101,12 +100,11 @@ int main(int argc, char** argv) {
       a1cfg.target_nis,
       a1cfg.nis_ema_alpha,
       a1cfg.gain,
-      a1cfg.deadband,
+      a1cfg.activate_ratio,
       a1cfg.r_min,
       a1cfg.r_max,
       a1cfg.spike_nis,
-      a1cfg.spike_gain,
-      a1cfg.spike_cap_ratio
+      a1cfg.spike_bump
     );
     meta.write_line(buf);
   }
@@ -120,10 +118,10 @@ int main(int argc, char** argv) {
   for (int k = 0; k < scfg.steps; ++k) {
     SimOut o = sim.step();
 
-    // KF step (uses current cfg_.r inside)
+    // KF step (uses current cfg_.r)
     KFDiag d = kf.step(o.meas.zx, o.meas.zy, o.meas.valid);
 
-    // A1: update R after seeing innovation (when measurement valid)
+    // A1: update R only after valid measurement update
     if (mode == "a1" && o.meas.valid) {
       double new_r = tuner.step(d.nis, kf.cfg().r);
       kf.cfg_mut().r = new_r;
@@ -131,6 +129,7 @@ int main(int argc, char** argv) {
 
     const KFState& s = kf.state();
     const double nis_ema = tuner.has_ema() ? tuner.nis_ema() : 0.0;
+    const double base_r = tuner.base_r();
 
     // log
     {
@@ -155,9 +154,9 @@ int main(int argc, char** argv) {
       if (do_hash) h ^= fnv1a64(buf, std::strlen(buf));
     }
     {
-      char buf[320];
-      std::snprintf(buf, sizeof(buf), "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-                    k, d.yx, d.yy, d.Sx, d.Sy, d.nis, kf.cfg().q, kf.cfg().r, nis_ema);
+      char buf[384];
+      std::snprintf(buf, sizeof(buf), "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+                    k, d.yx, d.yy, d.Sx, d.Sy, d.nis, kf.cfg().q, kf.cfg().r, nis_ema, base_r);
       diag.write_line(buf);
       if (do_hash) h ^= fnv1a64(buf, std::strlen(buf));
     }

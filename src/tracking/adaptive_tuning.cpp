@@ -5,50 +5,48 @@ double A1AdaptiveRTuner::step(double nis, double current_r) {
   if (!(nis >= 0.0) || !std::isfinite(nis)) nis = 0.0;
   if (!(current_r > 0.0) || !std::isfinite(current_r)) current_r = cfg_.r_min;
 
-  const double target = std::max(1e-9, cfg_.target_nis);
-
-  // --- 1) Spike / outlier inflation (instantaneous) ---
-  // If a single update has extremely large NIS, we treat it as likely clutter/outlier.
-  // Inflate R quickly so next updates don't get yanked by false measurements.
-  if (nis > cfg_.spike_nis) {
-    double ratio = nis / target;
-    ratio = clamp(ratio, 1.0, cfg_.spike_cap_ratio);
-
-    // simple bump: r <- r * (1 + spike_gain), repeated effect from repeated spikes
-    double bumped = current_r * (1.0 + cfg_.spike_gain);
-
-    // also allow a slight extra bump with ratio (gentle, bounded)
-    // e.g., ratio=50 => factor ~1.0..2.0
-    double extra = 1.0 + 0.02 * (ratio - 1.0);
-    extra = clamp(extra, 1.0, 2.0);
-
-    current_r = clamp(bumped * extra, cfg_.r_min, cfg_.r_max);
+  // Latch baseline r from first call (acts like "do no harm" floor)
+  if (!has_base_r_) {
+    base_r_ = current_r;
+    has_base_r_ = true;
   }
 
-  // --- 2) EMA on NIS (for smooth adaptation) ---
+  // Spike bump (clutter/outlier robustness): quick upward nudge only
+  if (nis > cfg_.spike_nis) {
+    current_r = clamp(current_r * (1.0 + std::max(0.0, cfg_.spike_bump)), cfg_.r_min, cfg_.r_max);
+  }
+
+  // EMA on NIS
+  const double a = clamp(cfg_.nis_ema_alpha, 0.0, 0.9999);
   if (!has_ema_) {
     nis_ema_ = nis;
     has_ema_ = true;
   } else {
-    const double a = clamp(cfg_.nis_ema_alpha, 0.0, 0.9999);
     nis_ema_ = a * nis_ema_ + (1.0 - a) * nis;
   }
 
-  // --- 3) Deadband: do nothing if we're already close to target ---
-  if (std::abs(nis_ema_ - target) < std::max(0.0, cfg_.deadband)) {
-    return clamp(current_r, cfg_.r_min, cfg_.r_max);
+  const double target = std::max(1e-9, cfg_.target_nis);
+  const double activate = std::max(1.0, cfg_.activate_ratio);
+
+  // If we're not strongly inconsistent, keep r at least baseline (no decrease below baseline)
+  if (nis_ema_ <= target * activate) {
+    return clamp(std::max(current_r, base_r_), cfg_.r_min, cfg_.r_max);
   }
 
-  // --- 4) Main multiplicative adaptation using EMA ratio ---
-  // ratio > 1 => increase R, ratio < 1 => decrease R
+  // Strong mismatch: increase r conservatively
   double ratio = nis_ema_ / target;
-  ratio = clamp(ratio, 0.05, 20.0);
+  ratio = clamp(ratio, 1.0, 50.0);
 
-  // Tempered exponent update
-  const double expo = clamp(cfg_.gain, 0.0, 1.0);
+  // Multiplicative growth with small exponent
+  const double expo = clamp(cfg_.gain, 0.0, 0.25);
   const double mult = std::pow(ratio, expo);
 
   double new_r = current_r * mult;
+
+  // Never go below baseline r
+  new_r = std::max(new_r, base_r_);
+
+  // Clamp
   new_r = clamp(new_r, cfg_.r_min, cfg_.r_max);
   return new_r;
 }
