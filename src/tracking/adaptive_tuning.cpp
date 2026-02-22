@@ -5,26 +5,46 @@ double A1AdaptiveRTuner::step(double nis, double current_r) {
   if (!(nis >= 0.0) || !std::isfinite(nis)) nis = 0.0;
   if (!(current_r > 0.0) || !std::isfinite(current_r)) current_r = cfg_.r_min;
 
-  // EMA on NIS
+  const double target = std::max(1e-9, cfg_.target_nis);
+
+  // --- 1) Spike / outlier inflation (instantaneous) ---
+  // If a single update has extremely large NIS, we treat it as likely clutter/outlier.
+  // Inflate R quickly so next updates don't get yanked by false measurements.
+  if (nis > cfg_.spike_nis) {
+    double ratio = nis / target;
+    ratio = clamp(ratio, 1.0, cfg_.spike_cap_ratio);
+
+    // simple bump: r <- r * (1 + spike_gain), repeated effect from repeated spikes
+    double bumped = current_r * (1.0 + cfg_.spike_gain);
+
+    // also allow a slight extra bump with ratio (gentle, bounded)
+    // e.g., ratio=50 => factor ~1.0..2.0
+    double extra = 1.0 + 0.02 * (ratio - 1.0);
+    extra = clamp(extra, 1.0, 2.0);
+
+    current_r = clamp(bumped * extra, cfg_.r_min, cfg_.r_max);
+  }
+
+  // --- 2) EMA on NIS (for smooth adaptation) ---
   if (!has_ema_) {
     nis_ema_ = nis;
     has_ema_ = true;
   } else {
-    nis_ema_ = cfg_.nis_ema_alpha * nis_ema_ + (1.0 - cfg_.nis_ema_alpha) * nis;
+    const double a = clamp(cfg_.nis_ema_alpha, 0.0, 0.9999);
+    nis_ema_ = a * nis_ema_ + (1.0 - a) * nis;
   }
 
-  const double target = std::max(1e-9, cfg_.target_nis);
+  // --- 3) Deadband: do nothing if we're already close to target ---
+  if (std::abs(nis_ema_ - target) < std::max(0.0, cfg_.deadband)) {
+    return clamp(current_r, cfg_.r_min, cfg_.r_max);
+  }
 
-  // If nis_ema > target => we are overconfident => increase R (r).
-  // If nis_ema < target => decrease R (r).
-  //
-  // Use a multiplicative update on r with a tempered ratio.
-  // ratio = nis_ema/target ; ratio>1 => increase r ; ratio<1 => decrease r
+  // --- 4) Main multiplicative adaptation using EMA ratio ---
+  // ratio > 1 => increase R, ratio < 1 => decrease R
   double ratio = nis_ema_ / target;
   ratio = clamp(ratio, 0.05, 20.0);
 
-  // Temper the ratio to avoid aggressive jumps.
-  // exponent in (0..1): smaller => gentler
+  // Tempered exponent update
   const double expo = clamp(cfg_.gain, 0.0, 1.0);
   const double mult = std::pow(ratio, expo);
 

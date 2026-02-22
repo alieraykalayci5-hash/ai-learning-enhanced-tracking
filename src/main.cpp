@@ -53,10 +53,14 @@ int main(int argc, char** argv) {
   // A1 config (adaptive R tuning)
   A1TunerConfig a1cfg;
   a1cfg.target_nis = arg_double(argc, argv, "--a1_target_nis", 2.0);
-  a1cfg.nis_ema_alpha = arg_double(argc, argv, "--a1_ema", 0.95);
-  a1cfg.gain = arg_double(argc, argv, "--a1_gain", 0.05);
+  a1cfg.nis_ema_alpha = arg_double(argc, argv, "--a1_ema", 0.97);
+  a1cfg.gain = arg_double(argc, argv, "--a1_gain", 0.03);
+  a1cfg.deadband = arg_double(argc, argv, "--a1_deadband", 0.25);
   a1cfg.r_min = arg_double(argc, argv, "--a1_rmin", 0.2);
   a1cfg.r_max = arg_double(argc, argv, "--a1_rmax", 100.0);
+  a1cfg.spike_nis = arg_double(argc, argv, "--a1_spike_nis", 50.0);
+  a1cfg.spike_gain = arg_double(argc, argv, "--a1_spike_gain", 0.20);
+  a1cfg.spike_cap_ratio = arg_double(argc, argv, "--a1_spike_cap_ratio", 50.0);
 
   const int do_hash = arg_int(argc, argv, "--hash", 1);
 
@@ -72,28 +76,38 @@ int main(int argc, char** argv) {
   meas.write_line("k,zx,zy,valid");
   est.write_line("k,x,y,vx,vy");
   diag.write_line("k,yx,yy,Sx,Sy,NIS,q,r,nis_ema");
-  meta.write_line("mode,scenario,dt,seed,steps,sigma_z,p_detect,clutter_prob,clutter_range,q,r,a1_target_nis,a1_ema,a1_gain,a1_rmin,a1_rmax");
+
+  meta.write_line(
+    "mode,scenario,dt,seed,steps,sigma_z,p_detect,clutter_prob,clutter_range,q,r,"
+    "a1_target_nis,a1_ema,a1_gain,a1_deadband,a1_rmin,a1_rmax,a1_spike_nis,a1_spike_gain,a1_spike_cap_ratio"
+  );
 
   {
-    char buf[512];
-    std::snprintf(buf, sizeof(buf),
-                  "%s,%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-                  mode.c_str(),
-                  scfg.scenario.c_str(),
-                  scfg.dt,
-                  (unsigned long long)scfg.seed,
-                  scfg.steps,
-                  scfg.sigma_z,
-                  scfg.p_detect,
-                  scfg.clutter_prob,
-                  scfg.clutter_range,
-                  kcfg.q,
-                  kcfg.r,
-                  a1cfg.target_nis,
-                  a1cfg.nis_ema_alpha,
-                  a1cfg.gain,
-                  a1cfg.r_min,
-                  a1cfg.r_max);
+    char buf[768];
+    std::snprintf(
+      buf, sizeof(buf),
+      "%s,%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+      mode.c_str(),
+      scfg.scenario.c_str(),
+      scfg.dt,
+      (unsigned long long)scfg.seed,
+      scfg.steps,
+      scfg.sigma_z,
+      scfg.p_detect,
+      scfg.clutter_prob,
+      scfg.clutter_range,
+      kcfg.q,
+      kcfg.r,
+      a1cfg.target_nis,
+      a1cfg.nis_ema_alpha,
+      a1cfg.gain,
+      a1cfg.deadband,
+      a1cfg.r_min,
+      a1cfg.r_max,
+      a1cfg.spike_nis,
+      a1cfg.spike_gain,
+      a1cfg.spike_cap_ratio
+    );
     meta.write_line(buf);
   }
 
@@ -113,8 +127,6 @@ int main(int argc, char** argv) {
     if (mode == "a1" && o.meas.valid) {
       double new_r = tuner.step(d.nis, kf.cfg().r);
       kf.cfg_mut().r = new_r;
-    } else if (mode != "baseline" && mode != "a1") {
-      // Unknown mode -> behave as baseline
     }
 
     const KFState& s = kf.state();
