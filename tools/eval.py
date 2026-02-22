@@ -28,10 +28,11 @@ def exe_path(root: Path) -> Path:
 
 def run_one(root: Path, out_dir: Path, scenario: str, seed: int, steps: int,
             sigma_z: float, p_detect: float, clutter_prob: float,
-            q: float, r: float) -> str:
+            q: float, r: float, mode: str) -> None:
   out_dir.mkdir(parents=True, exist_ok=True)
   cmd = [
     str(exe_path(root)),
+    "--mode", mode,
     "--scenario", scenario,
     "--seed", str(seed),
     "--steps", str(steps),
@@ -44,7 +45,7 @@ def run_one(root: Path, out_dir: Path, scenario: str, seed: int, steps: int,
     "--out", str(out_dir),
     "--hash", "1",
   ]
-  return run_cmd(cmd, cwd=root)
+  run_cmd(cmd, cwd=root)
 
 
 def rmse(a: np.ndarray) -> float:
@@ -57,7 +58,6 @@ def eval_run(out_dir: Path) -> dict:
   diag = pd.read_csv(out_dir / "diag.csv")
   meta = pd.read_csv(out_dir / "meta.csv").iloc[0].to_dict()
 
-  # Align by k
   df = truth.merge(est, on="k", suffixes=("_truth", "_est")).merge(diag, on="k")
 
   ex = (df["x_est"] - df["x_truth"]).to_numpy()
@@ -73,9 +73,14 @@ def eval_run(out_dir: Path) -> dict:
   nis_p50 = float(np.percentile(nis, 50))
   nis_p95 = float(np.percentile(nis, 95))
 
-  # Expected mean NIS ~ measurement dimension (=2) when model/noise consistent
   nis_mean_target = 2.0
   nis_mean_error = float(nis_mean - nis_mean_target)
+
+  # r trajectory summary (useful to show adaptation)
+  r_series = df["r"].to_numpy()
+  r_min = float(np.min(r_series))
+  r_max = float(np.max(r_series))
+  r_final = float(r_series[-1])
 
   out = {
     "meta": meta,
@@ -86,12 +91,15 @@ def eval_run(out_dir: Path) -> dict:
       "nis_p50": nis_p50,
       "nis_p95": nis_p95,
       "nis_mean_error_vs_2": nis_mean_error,
+      "r_min": r_min,
+      "r_max": r_max,
+      "r_final": r_final,
     },
   }
   return out
 
 
-def plot_rmse_timeseries(out_dir: Path, plot_path: Path) -> None:
+def plot_pos_error(out_dir: Path, plot_path: Path, title: str) -> None:
   truth = pd.read_csv(out_dir / "truth.csv")
   est = pd.read_csv(out_dir / "est.csv")
   df = truth.merge(est, on="k", suffixes=("_truth", "_est"))
@@ -99,7 +107,7 @@ def plot_rmse_timeseries(out_dir: Path, plot_path: Path) -> None:
 
   plt.figure()
   plt.plot(e)
-  plt.title("Position Error Over Time")
+  plt.title(title)
   plt.xlabel("k")
   plt.ylabel("pos_error")
   plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,15 +116,30 @@ def plot_rmse_timeseries(out_dir: Path, plot_path: Path) -> None:
   plt.close()
 
 
-def plot_nis_hist(out_dir: Path, plot_path: Path) -> None:
+def plot_nis_hist(out_dir: Path, plot_path: Path, title: str) -> None:
   diag = pd.read_csv(out_dir / "diag.csv")
   nis = diag["NIS"].to_numpy()
 
   plt.figure()
   plt.hist(nis, bins=60)
-  plt.title("NIS Histogram")
+  plt.title(title)
   plt.xlabel("NIS")
   plt.ylabel("count")
+  plot_path.parent.mkdir(parents=True, exist_ok=True)
+  plt.tight_layout()
+  plt.savefig(plot_path, dpi=150)
+  plt.close()
+
+
+def plot_r_over_time(out_dir: Path, plot_path: Path, title: str) -> None:
+  diag = pd.read_csv(out_dir / "diag.csv")
+  r = diag["r"].to_numpy()
+
+  plt.figure()
+  plt.plot(r)
+  plt.title(title)
+  plt.xlabel("k")
+  plt.ylabel("r (meas variance)")
   plot_path.parent.mkdir(parents=True, exist_ok=True)
   plt.tight_layout()
   plt.savefig(plot_path, dpi=150)
@@ -133,6 +156,7 @@ def main():
   ap.add_argument("--seed", type=int, default=123)
   ap.add_argument("--q", type=float, default=1.0)
   ap.add_argument("--r", type=float, default=4.0)
+  ap.add_argument("--mode", default="both", help="baseline | a1 | both")
   ap.add_argument("--smoke", action="store_true", help="small deterministic eval for smoke test")
   args = ap.parse_args()
 
@@ -153,45 +177,92 @@ def main():
     ("clutter", dict(sigma_z=2.0, p_detect=0.9, clutter_prob=0.25)),
   ]
 
+  modes = []
+  if args.mode == "both":
+    modes = ["baseline", "a1"]
+  else:
+    modes = [args.mode]
+
   report = {
-    "type": "baseline",
+    "type": "comparison" if "baseline" in modes and "a1" in modes else modes[0],
     "scenarios": {},
   }
 
   for name, cfg in scenarios:
-    out_dir = out_root / f"{name}"
-    run_one(root, out_dir, name, args.seed, args.steps,
-            sigma_z=float(cfg["sigma_z"]),
-            p_detect=float(cfg["p_detect"]),
-            clutter_prob=float(cfg["clutter_prob"]),
-            q=float(args.q), r=float(args.r))
+    report["scenarios"][name] = {}
 
-    rep = eval_run(out_dir)
-    report["scenarios"][name] = rep
+    for mode in modes:
+      out_dir = out_root / f"{name}_{mode}"
+      run_one(root, out_dir, name, args.seed, args.steps,
+              sigma_z=float(cfg["sigma_z"]),
+              p_detect=float(cfg["p_detect"]),
+              clutter_prob=float(cfg["clutter_prob"]),
+              q=float(args.q), r=float(args.r),
+              mode=mode)
 
-    # per-scenario plots
-    plot_rmse_timeseries(out_dir, plots_dir / f"baseline_{name}_rmse.png")
-    plot_nis_hist(out_dir, plots_dir / f"baseline_{name}_nis.png")
+      rep = eval_run(out_dir)
+      report["scenarios"][name][mode] = rep
+
+      # per-scenario plots
+      plot_pos_error(out_dir, plots_dir / f"{mode}_{name}_rmse.png", f"{mode.upper()} Position Error Over Time ({name})")
+      plot_nis_hist(out_dir, plots_dir / f"{mode}_{name}_nis.png", f"{mode.upper()} NIS Histogram ({name})")
+      if mode == "a1":
+        plot_r_over_time(out_dir, plots_dir / f"{mode}_{name}_r.png", f"A1 R Adaptation Over Time ({name})")
+
+    # comparison stats
+    if "baseline" in modes and "a1" in modes:
+      b = report["scenarios"][name]["baseline"]["metrics"]
+      a = report["scenarios"][name]["a1"]["metrics"]
+
+      def imp(bv, av):
+        return float((bv - av) / max(1e-12, bv) * 100.0)
+
+      report["scenarios"][name]["improvement_pct"] = {
+        "pos_rmse": imp(b["pos_rmse"], a["pos_rmse"]),
+        "vel_rmse": imp(b["vel_rmse"], a["vel_rmse"]),
+        "nis_mean_abs_error": imp(abs(b["nis_mean_error_vs_2"]), abs(a["nis_mean_error_vs_2"])),
+      }
 
   reports_dir.mkdir(parents=True, exist_ok=True)
-  report_path = reports_dir / ("smoke_baseline_metrics.json" if args.smoke else "baseline_metrics.json")
+  if args.smoke:
+    report_path = reports_dir / "smoke_comparison_metrics.json"
+  else:
+    report_path = reports_dir / ("comparison_metrics.json" if "baseline" in modes and "a1" in modes else f"{modes[0]}_metrics.json")
   report_path.write_text(json.dumps(report, indent=2) + "\n")
 
-  # Also write a compact top-level plot (aggregate bar)
-  names = list(report["scenarios"].keys())
-  pos = [report["scenarios"][n]["metrics"]["pos_rmse"] for n in names]
-  vel = [report["scenarios"][n]["metrics"]["vel_rmse"] for n in names]
-  plt.figure()
-  x = np.arange(len(names))
-  plt.bar(x - 0.2, pos, width=0.4, label="pos_rmse")
-  plt.bar(x + 0.2, vel, width=0.4, label="vel_rmse")
-  plt.xticks(x, names, rotation=20)
-  plt.title("Baseline RMSE by Scenario")
-  plt.ylabel("rmse")
-  plt.legend()
-  plt.tight_layout()
-  plt.savefig(plots_dir / "baseline_rmse.png", dpi=150)
-  plt.close()
+  # Aggregate comparison plot
+  if "baseline" in modes and "a1" in modes:
+    names = [s[0] for s in scenarios]
+    bpos = [report["scenarios"][n]["baseline"]["metrics"]["pos_rmse"] for n in names]
+    apos = [report["scenarios"][n]["a1"]["metrics"]["pos_rmse"] for n in names]
+
+    bvel = [report["scenarios"][n]["baseline"]["metrics"]["vel_rmse"] for n in names]
+    avel = [report["scenarios"][n]["a1"]["metrics"]["vel_rmse"] for n in names]
+
+    x = np.arange(len(names))
+    width = 0.35
+
+    plt.figure()
+    plt.bar(x - width/2, bpos, width, label="baseline_pos_rmse")
+    plt.bar(x + width/2, apos, width, label="a1_pos_rmse")
+    plt.xticks(x, names, rotation=20)
+    plt.title("Position RMSE: Baseline vs A1")
+    plt.ylabel("rmse")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(plots_dir / "comparison_pos_rmse.png", dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.bar(x - width/2, bvel, width, label="baseline_vel_rmse")
+    plt.bar(x + width/2, avel, width, label="a1_vel_rmse")
+    plt.xticks(x, names, rotation=20)
+    plt.title("Velocity RMSE: Baseline vs A1")
+    plt.ylabel("rmse")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(plots_dir / "comparison_vel_rmse.png", dpi=150)
+    plt.close()
 
   print(f"Wrote report: {report_path}")
   print(f"Wrote plots under: {plots_dir}")

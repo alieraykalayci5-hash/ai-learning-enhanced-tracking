@@ -1,5 +1,6 @@
 #include "sim/sim.h"
 #include "tracking/kalman.h"
+#include "tracking/adaptive_tuning.h"
 #include "util/csv.h"
 #include "util/fnv1a.h"
 
@@ -30,6 +31,9 @@ static uint64_t arg_u64(int argc, char** argv, const std::string& key, uint64_t 
 int main(int argc, char** argv) {
   const std::string out_dir = arg_str(argc, argv, "--out", "out_run");
 
+  // Mode
+  const std::string mode = arg_str(argc, argv, "--mode", "baseline"); // baseline | a1
+
   // Sim config
   SimConfig scfg;
   scfg.dt = arg_double(argc, argv, "--dt", 0.02);
@@ -46,6 +50,14 @@ int main(int argc, char** argv) {
   kcfg.q = arg_double(argc, argv, "--q", 1.0);
   kcfg.r = arg_double(argc, argv, "--r", 4.0);
 
+  // A1 config (adaptive R tuning)
+  A1TunerConfig a1cfg;
+  a1cfg.target_nis = arg_double(argc, argv, "--a1_target_nis", 2.0);
+  a1cfg.nis_ema_alpha = arg_double(argc, argv, "--a1_ema", 0.95);
+  a1cfg.gain = arg_double(argc, argv, "--a1_gain", 0.05);
+  a1cfg.r_min = arg_double(argc, argv, "--a1_rmin", 0.2);
+  a1cfg.r_max = arg_double(argc, argv, "--a1_rmax", 100.0);
+
   const int do_hash = arg_int(argc, argv, "--hash", 1);
 
   std::filesystem::create_directories(out_dir);
@@ -59,12 +71,14 @@ int main(int argc, char** argv) {
   truth.write_line("k,x,y,vx,vy");
   meas.write_line("k,zx,zy,valid");
   est.write_line("k,x,y,vx,vy");
-  diag.write_line("k,yx,yy,Sx,Sy,NIS,q,r");
-  meta.write_line("scenario,dt,seed,steps,sigma_z,p_detect,clutter_prob,clutter_range,q,r");
+  diag.write_line("k,yx,yy,Sx,Sy,NIS,q,r,nis_ema");
+  meta.write_line("mode,scenario,dt,seed,steps,sigma_z,p_detect,clutter_prob,clutter_range,q,r,a1_target_nis,a1_ema,a1_gain,a1_rmin,a1_rmax");
 
   {
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  "%s,%s,%.6f,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+                  mode.c_str(),
                   scfg.scenario.c_str(),
                   scfg.dt,
                   (unsigned long long)scfg.seed,
@@ -74,20 +88,37 @@ int main(int argc, char** argv) {
                   scfg.clutter_prob,
                   scfg.clutter_range,
                   kcfg.q,
-                  kcfg.r);
+                  kcfg.r,
+                  a1cfg.target_nis,
+                  a1cfg.nis_ema_alpha,
+                  a1cfg.gain,
+                  a1cfg.r_min,
+                  a1cfg.r_max);
     meta.write_line(buf);
   }
 
   Sim2D sim(scfg);
   KF2D kf(scfg.dt, kcfg);
+  A1AdaptiveRTuner tuner(a1cfg);
 
   uint64_t h = 0;
 
   for (int k = 0; k < scfg.steps; ++k) {
     SimOut o = sim.step();
 
+    // KF step (uses current cfg_.r inside)
     KFDiag d = kf.step(o.meas.zx, o.meas.zy, o.meas.valid);
+
+    // A1: update R after seeing innovation (when measurement valid)
+    if (mode == "a1" && o.meas.valid) {
+      double new_r = tuner.step(d.nis, kf.cfg().r);
+      kf.cfg_mut().r = new_r;
+    } else if (mode != "baseline" && mode != "a1") {
+      // Unknown mode -> behave as baseline
+    }
+
     const KFState& s = kf.state();
+    const double nis_ema = tuner.has_ema() ? tuner.nis_ema() : 0.0;
 
     // log
     {
@@ -112,9 +143,9 @@ int main(int argc, char** argv) {
       if (do_hash) h ^= fnv1a64(buf, std::strlen(buf));
     }
     {
-      char buf[256];
-      std::snprintf(buf, sizeof(buf), "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
-                    k, d.yx, d.yy, d.Sx, d.Sy, d.nis, kf.cfg().q, kf.cfg().r);
+      char buf[320];
+      std::snprintf(buf, sizeof(buf), "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+                    k, d.yx, d.yy, d.Sx, d.Sy, d.nis, kf.cfg().q, kf.cfg().r, nis_ema);
       diag.write_line(buf);
       if (do_hash) h ^= fnv1a64(buf, std::strlen(buf));
     }

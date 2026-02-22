@@ -17,10 +17,10 @@ fi
 cmake -S . -B build -G Ninja
 cmake --build build -j
 
-# Baseline eval (small deterministic)
-"$PY" tools/eval.py --smoke
+# Both baseline + A1 (small deterministic)
+"$PY" tools/eval.py --smoke --mode both
 
-# Compute FNV-1a 64 of the JSON report (stable)
+# Stable FNV-1a 64 of the JSON report
 "$PY" - <<'PY'
 from pathlib import Path
 
@@ -31,19 +31,19 @@ def fnv1a64(data: bytes) -> int:
     h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
   return h
 
-p = Path("reports/smoke_baseline_metrics.json")
+p = Path("reports/smoke_comparison_metrics.json")
 b = p.read_bytes()
 h = fnv1a64(b)
 Path("reports/smoke_hash.txt").write_text(f"{h:016x}\n")
-print(f"SMOKE_BASELINE_FNV1A64={h:016x}")
+print(f"SMOKE_COMPARISON_FNV1A64={h:016x}")
 PY
 
 CUR="$(cat reports/smoke_hash.txt | tr -d '\r\n')"
-EXP_LINE="$(grep -E '^SMOKE_BASELINE_FNV1A64=' scripts/expected.txt || true)"
-EXP="${EXP_LINE#SMOKE_BASELINE_FNV1A64=}"
+EXP_LINE="$(grep -E '^SMOKE_COMPARISON_FNV1A64=' scripts/expected.txt || true)"
+EXP="${EXP_LINE#SMOKE_COMPARISON_FNV1A64=}"
 
 if [[ -z "${EXP:-}" ]]; then
-  echo "SMOKE_BASELINE_FNV1A64=$CUR" > scripts/expected.txt
+  echo "SMOKE_COMPARISON_FNV1A64=$CUR" > scripts/expected.txt
   echo "[SMOKE] BASELINED expected.txt (run again to verify)"
   exit 0
 fi
